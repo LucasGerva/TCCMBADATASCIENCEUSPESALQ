@@ -1,0 +1,318 @@
+# CÓDIGO PARA ANALISE DE CORRESPONDENCIA SIMPLES (ANACOR)
+
+# pip install xlrd>=2.0.1
+# pip install pnadium
+# pip install gspread gspread_dataframe
+# pip install pandas
+# pip install numpy
+# pip install scipy
+# pip install plotly
+# pip install seaborn
+# pip install matplotlib
+# pip install statsmodels
+# pip install prince
+# pip install adjustText
+
+# Importando os pacotes necessários
+import pnadium
+import pandas as pd
+import numpy as np
+from scipy.stats import chi2_contingency
+import statsmodels.api as sm
+import seaborn as sns
+import matplotlib.pyplot as plt
+import prince
+import plotly.graph_objects as go
+from adjustText import adjust_text
+
+# Análise de Correspondência Simples (ANACOR)
+
+# Importando o banco de dados
+pnad_db = pnadium.trimestral.download(2025, 4, colunas =['UF', 'V2007','VD4019','V2010', 'VD4011'])
+
+# Renomeando as colunas
+pnad_df = pnad_db.rename(columns={'V2007': 'Genero', 'V2010':'Cor/Raça', 'VD4011' : 'Tipo de Cargo', 'V2003' : 'N° da Ordem', 'V1014': 'Painel', 'V1008' : 'N° de selecao' })
+
+print(pnad_df['Tipo de Cargo'].isna().sum());
+print(pnad_df['Genero'].isna().sum())
+
+# Excluindo os que possuem valor vazio em Tipo de Cargo e Genero
+pnad_df = pnad_df[pnad_df['Tipo de Cargo'].notna()]
+pnad_df = pnad_df[pnad_df['Genero'].notna()]
+
+# Conversão para INT *APENAS* no Tipo de Cargo para remover as casas decimais no gráfico
+pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].astype(int)
+
+# Traduzindo a descrição dos dados de acordo com o Dicionario PNAD
+pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].replace({
+    1:'Direção',
+    2:'Intelectuais',
+    3:'Técnicos',
+    4:'Administrativo',
+    5:'Serviços/Vendas',
+    6:'Agro/Pesca',
+    7:'Operários',
+    8:'Operadores',
+    9:'Elementares',
+    10:'Militares',
+    11:'Indefinidas'
+})
+
+# Excluindo a variável "Indefinidas" para evitar distorções na análise
+pnad_df = pnad_df[pnad_df['Tipo de Cargo'] != 'Indefinidas']
+
+pnad_df['Genero'] = pnad_df['Genero'].replace({
+    1:'Homem',
+    2:'Mulher'
+})
+
+pnad_df['Cor/Raça'] = pnad_df['Cor/Raça'].replace({
+    1:'Branca',
+    2:'Preta',
+    3:'Amarela',
+    4 :'Parda',
+    5:'Indígena',
+    9:'Ignorado'
+})
+
+# Excluindo a variável "Ignorado" para evitar distorções na análise
+pnad_df = pnad_df[pnad_df['Cor/Raça'] != 'Ignorado']
+
+
+# Contagem de dados
+print(pnad_df['Tipo de Cargo'].count());
+print(pnad_df['Genero'].count())
+
+
+# Informações descritivas sobre as variáveis
+print('Informações descritivas sobre as variáveis (Contando os valores)')
+print(' ')
+
+print(pnad_df['Genero'].value_counts())
+print(' ')
+
+print(pnad_df['Tipo de Cargo'].value_counts())
+print(' ')
+
+
+# Criando a tabela de contingência
+tabela = pd.crosstab(pnad_df["Genero"], pnad_df["Tipo de Cargo"])
+print(' ')
+
+print('Tabela de contingência')
+print(' ')
+print(tabela)
+print(' ')
+
+
+
+# Analisando a significância estatística da associação (teste qui²)
+teste_qui2 = chi2_contingency(tabela)
+
+print(f"estatística qui²: {round(teste_qui2[0], 2)}")
+print(' ')
+
+print(f"p-valor da estatística: {round(teste_qui2[1], 4)}")
+print(' ')
+
+print(f"graus de liberdade: {teste_qui2[2]}")
+print(' ')
+
+# Parametrizando a função
+tab_cont = sm.stats.Table(tabela)
+
+# Tabela de frequências absolutas esperadas
+print('Tabela frequências absolutas esperadas')
+print(tab_cont.fittedvalues)
+print(' ')
+
+# Tabela de resíduos: diferença entre freq. absolutas observadas e esperadas
+print('Tabela de resíduos: diferença entre freq. absolutas observadas e esperadas')
+print(tabela - tab_cont.fittedvalues)
+print(' ')
+
+# Valores qui-quadrado por célula
+print('Tabela de valores qui-quadrado por célula')
+print(tab_cont.chi2_contribs)
+print(' ')
+
+# Resíduos padronizados
+print('Tabela de Resíduos padronizados')
+print(tab_cont.resid_pearson)
+print(' ')
+
+# Resíduos padronizados ajustados
+print('Tabela de Resíduos padronizados ajustados')
+print(tab_cont.standardized_resids)
+print(' ')
+
+# Mapa de calor dos resíduos padronizados ajustados
+print('Mapa de calor dos resíduos padronizados ajustados')
+fig = go.Figure()
+
+maxz = np.max(tab_cont.standardized_resids.to_numpy()) + 0.1
+minz = np.min(tab_cont.standardized_resids.to_numpy()) - 0.1
+
+colorscale = ['skyblue' if i>1.96 else '#FAF9F6' for i in np.arange(minz,maxz,0.01)]
+
+fig.add_trace(
+    go.Heatmap(
+        x = tab_cont.standardized_resids.columns,
+        y = tab_cont.standardized_resids.index,
+        z = np.array(tab_cont.standardized_resids),
+        text = tab_cont.standardized_resids.values,
+        texttemplate = '%{text:.2f}',
+        showscale = False,
+        colorscale = colorscale))
+
+fig.update_layout(
+    title_text = 'Resíduos Padronizados Ajustados',
+    title_x = 0.5,
+    height = 600,
+    width = 600)
+
+fig.update_xaxes(categoryorder = 'category ascending')
+fig.update_yaxes(categoryorder = 'category descending')
+
+fig.show()
+print(' ')
+
+#Elaborando a ANACOR
+
+
+# Na função, o input é a tabela de contingência criada antes
+ca = prince.CA().fit(tabela)
+
+# Obtendo os eigenvalues
+tabela_autovalores = ca.eigenvalues_summary
+print(tabela_autovalores)
+
+# São gerados 'm' autovalores: m = mín(I-1,J-1)
+
+# Obtendo a inércia principal total
+
+# É a soma dos eigenvalues (também é a divisão: estat. qui² / N)
+# Quanto maior a inércia principal total, maior é a associação entre categorias
+print(ca.total_inertia_)
+
+# Massas das categorias
+
+# Massas da variável em linha
+print(ca.row_masses_)
+
+# Massas da variável em coluna
+print(ca.col_masses_)
+
+# Autovetores
+
+# Autovetor linha
+print(ca.svd_.U)
+
+# Autovetor coluna
+print(ca.svd_.V.T)
+
+# Obtendo as coordenadas do mapa perceptual
+
+# Coordenadas da variável em linha
+print(ca.row_coordinates(tabela))
+
+# Coordenadas da variável em coluna
+print(ca.column_coordinates(tabela))
+
+# Plotando o mapa percentual da Anacor (Com Melhoria de Visualização)
+
+
+# Verificação de segurança
+num_dims = ca.row_coordinates(tabela).shape[1]
+
+# 1. TÉCNICA DO ZIGUE-ZAGUE VERTICAL PARA 1D
+# Distribuindo os pontos em níveis de altura diferentes para não haver sobreposição
+if num_dims > 1:
+    y_row_vals = ca.row_coordinates(tabela)[1].values
+    y_col_vals = ca.column_coordinates(tabela)[1].values
+else:
+    # Gêneros ficam na parte de cima
+    y_row_vals = np.full(tabela.shape[0], 0.1)
+
+    # Cargos ficam na parte de baixo, alternando em 4 degraus (-0.05, -0.15, -0.25, -0.35)
+    niveis_y = [-0.05, -0.15, -0.25, -0.35]
+    y_col_vals = np.array([niveis_y[i % 4] for i in range(tabela.shape[1])])
+
+chart_df_row = pd.DataFrame({
+    'var_row': tabela.index,
+    'x_row': ca.row_coordinates(tabela)[0].values,
+    'y_row': y_row_vals
+})
+
+chart_df_col = pd.DataFrame({
+    'var_col': tabela.columns,
+    'x_col': ca.column_coordinates(tabela)[0].values,
+    'y_col': y_col_vals
+})
+
+dim1_label = f"Dim. 1: {tabela_autovalores.iloc[0,1]} da inércia"
+dim2_label = f"Dim. 2: {tabela_autovalores.iloc[1,1]} da inércia" if num_dims > 1 else "Dim. 2: Inexistente (Separação Artificial)"
+
+plt.figure(dpi=600, figsize=(10, 6))
+ax = plt.gca()
+
+# Retirando totalmente o preenchimento de fundo da imagem
+fig = plt.gcf()
+fig.patch.set_facecolor('none')
+ax.set_facecolor('none')
+
+# 2. TÉCNICA DE TRANSPARÊNCIA (alpha=0.6) e aumento do ponto (s=50)
+sns.scatterplot(data=chart_df_row, x='x_row', y='y_row', s=50, alpha=0.7, color='navy', label='Gênero')
+sns.scatterplot(data=chart_df_col, x='x_col', y='y_col', s=50, alpha=0.7, color='darkorange', label='Tipo de Cargo')
+
+# 3. LISTA DE TEXTOS PARA O ADJUST_TEXT
+texts = []
+
+# Adicionando os textos de Gênero
+for i, point in chart_df_row.iterrows():
+    texts.append(plt.text(point['x_row'], point['y_row'], point['var_row'], fontsize=8, color='navy'))
+
+# Adicionando os textos de Tipo de Cargo
+for i, point in chart_df_col.iterrows():
+    texts.append(plt.text(point['x_col'], point['y_col'], point['var_col'], fontsize=8, color='darkorange'))
+
+# Aplicando o algoritmo para refinar os espaços finais
+# Aumentamos a força de repulsão (force_text) para ele ser mais agressivo caso ainda precisem se afastar
+adjust_text(texts, force_text=(0.5, 1.0), arrowprops=dict(arrowstyle="-", color='gray', lw=0.5))
+
+# Retirando bordas indesejadas (superior e direita)
+sns.despine(top=True, right=True, left=False, bottom=False)
+
+# Garantindo a remoção de linhas de grade e mantendo a área limpa
+ax.grid(False)
+
+# Formatando os Eixos Principais (Esquerda e Inferior) - Sólido, Preto, 1.5pt
+ax.spines['bottom'].set_color('black')
+ax.spines['bottom'].set_linewidth(1.5)
+ax.spines['bottom'].set_linestyle('-')
+
+ax.spines['left'].set_color('black')
+ax.spines['left'].set_linewidth(1.5)
+ax.spines['left'].set_linestyle('-')
+
+# Se for 1D, expandimos mais o eixo Y para caber o nosso zigue-zague
+if num_dims == 1:
+    plt.ylim(-0.45, 0.25)
+
+plt.tick_params(size=2, labelsize=6)
+
+# Aplicando a formatação requerida para os títulos dos eixos
+font_axes = {'family': 'Arial', 'size': 11, 'color': 'black'}
+plt.xlabel(dim1_label, fontdict=font_axes)
+plt.ylabel(dim2_label, fontdict=font_axes)
+
+# Título do gráfico não deve conter
+plt.title('')
+
+# Colocando a legenda do gráfico fora da área de plotagem para não atrapalhar
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+#%% FIM!
