@@ -1,0 +1,262 @@
+# CÓDIGO PARA ANALISE DE CORRESPONDENCIA MULTIPLA (ACM)
+
+#pip install xlrd>=2.0.1
+#pip install pnadium
+#pip install gspread gspread_dataframe
+#pip install pandas
+#pip install numpy
+#pip install scipy
+#pip install plotly
+#pip install seaborn
+#pip install matplotlib
+#pip install statsmodels
+#pip install prince
+#pip install adjustText
+
+#Importando os pacotes necessários
+import pandas as pd
+import numpy as np
+from scipy.stats import chi2_contingency
+import seaborn as sns
+import matplotlib.pyplot as plt
+import prince
+import pnadium
+from adjustText import adjust_text
+
+
+# Importando o banco de dados
+pnad_db = pnadium.trimestral.download(2025, 4, colunas =['UF', 'V2007','VD4019','V2010', 'VD4011'])
+
+# Renomeando as colunas
+pnad_df = pnad_db.rename(columns={'V2007': 'Genero', 'V2010':'Cor/Raça', 'VD4011' : 'Tipo de Cargo', 'V2003' : 'N° da Ordem', 'V1014': 'Painel', 'V1008' : 'N° de selecao' })
+
+print(pnad_df['Tipo de Cargo'].isna().sum());
+print(pnad_df['Genero'].isna().sum())
+print(pnad_df['Cor/Raça'].isna().sum())
+
+# Excluindo os que possuem valor vazio
+pnad_df = pnad_df[pnad_df['Tipo de Cargo'].notna()]
+pnad_df = pnad_df[pnad_df['Genero'].notna()]
+pnad_df = pnad_df[pnad_df['Cor/Raça'].notna()]
+
+# Conversão para INT *APENAS* no Tipo de Cargo para remover as casas decimais no gráfico
+pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].astype(int)
+
+# Traduzindo a descrição dos dados de acordo com o Dicionario PNAD
+
+pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].replace({
+    1:'Direção',
+    2:'Intelectuais',
+    3:'Técnicos',
+    4:'Administrativo',
+    5:'Serviços/Vendas',
+    6:'Agro/Pesca',
+    7:'Operários',
+    8:'Operadores',
+    9:'Elementares',
+    10:'Militares',
+    11:'Indefinidas'
+})
+
+# Excluindo a variável "Indefinidas" para evitar distorções na análise
+pnad_df = pnad_df[pnad_df['Tipo de Cargo'] != 'Indefinidas']
+
+
+pnad_df['Genero'] = pnad_df['Genero'].replace({
+    1:'Homem',
+    2:'Mulher'
+})
+
+pnad_df['Cor/Raça'] = pnad_df['Cor/Raça'].replace({
+    1:'Branca',
+    2:'Preta',
+    3:'Amarela',
+    4 :'Parda',
+    5:'Indígena',
+    9:'Ignorado'
+})
+
+# Excluindo a variável "Ignorado" para evitar distorções na análise
+pnad_df = pnad_df[pnad_df['Cor/Raça'] != 'Ignorado']
+
+# Informações descritivas sobre as variáveis
+
+print(pnad_df['Genero'].value_counts())
+print(' ')
+
+print(pnad_df['Tipo de Cargo'].value_counts())
+print(' ')
+
+print(pnad_df['Cor/Raça'].value_counts())
+print(' ')
+
+# Analisando as tabelas de contingência
+
+tabela_mca_1 = pd.crosstab(pnad_df["Genero"], pnad_df["Tipo de Cargo"])
+tabela_mca_2 = pd.crosstab(pnad_df["Genero"], pnad_df["Cor/Raça"])
+tabela_mca_3 = pd.crosstab(pnad_df["Tipo de Cargo"], pnad_df["Cor/Raça"])
+
+print(tabela_mca_1)
+print(tabela_mca_2)
+print(tabela_mca_3)
+
+# Analisando a significância estatística das associações (teste qui²)
+
+from scipy.stats import chi2_contingency
+
+tab_1 = chi2_contingency(tabela_mca_1)
+
+print("Associação Genero x Tipo de Cargo")
+print(f"estatística qui²: {round(tab_1[0], 2)}")
+print(f"p-valor da estatística: {round(tab_1[1], 4)}")
+print(f"graus de liberdade: {tab_1[2]}")
+
+tab_2 = chi2_contingency(tabela_mca_2)
+
+print("Associação Genero x Cor/Raça")
+print(f"estatística qui²: {round(tab_2[0], 2)}")
+print(f"p-valor da estatística: {round(tab_2[1], 4)}")
+print(f"graus de liberdade: {tab_2[2]}")
+
+tab_3 = chi2_contingency(tabela_mca_3)
+
+print("Associação Tipo de Cargo x Cor/Raça")
+print(f"estatística qui²: {round(tab_3[0], 2)}")
+print(f"p-valor da estatística: {round(tab_3[1], 4)}")
+print(f"graus de liberdade: {tab_3[2]}")
+
+# Elaborando a MCA
+
+# Isolando as variáveis categóricas para evitar o estouro de memória!
+df_mca = pnad_df[['Genero', 'Cor/Raça', 'Tipo de Cargo']]
+
+mca = prince.MCA(n_components=2).fit(df_mca)
+
+# Parametrizando a MCA para duas dimensões (eixos X e Y no mapa perceptual)
+
+# Quantidade total de dimensões
+
+# Quantidade de dimensões = qtde total de categorias - qtde de variáveis
+
+# Quantidade total de categorias
+mca.J_
+
+# Quantidade de variáveis na análise
+mca.K_
+
+# Quantidade de dimensões
+quant_dim = mca.J_ - mca.K_
+
+# Resumo das informações
+print(f"quantidade total de categorias: {mca.J_}")
+print(f"quantidade de variáveis: {mca.K_}")
+print(f"quantidade de dimensões: {quant_dim}")
+
+# Visualizando as matrizes: binária e Burt
+
+# Usando o df_mca para gerar as matrizes
+binaria = pd.get_dummies(df_mca, columns=df_mca.columns, dtype=float)
+
+burt = np.matmul(np.transpose(binaria), binaria)
+
+# Obtendo os eigenvalues
+
+tabela_autovalores = mca.eigenvalues_summary
+
+print(tabela_autovalores)
+
+# Inércia principal total
+
+# Soma de todos os autovalores (todas as dimensões existentes)
+
+print(mca.total_inertia_)
+
+# Obtendo as coordenadas principais das categorias das variáveis
+
+coord_burt = mca.column_coordinates(df_mca)
+
+print(coord_burt)
+
+# Obtendo as coordenadas-padrão das categorias das variáveis
+
+coord_padrao = mca.column_coordinates(df_mca)/np.sqrt(mca.eigenvalues_)
+
+print(coord_padrao)
+
+# Obtendo as coordenadas das observações do banco de dados
+
+coord_obs = mca.row_coordinates(df_mca)
+
+print(coord_obs)
+
+# Plotando o mapa perceptual
+
+# Forçando o estilo branco puro no seaborn para evitar preenchimentos cinzas do Colab
+sns.set_style("white")
+
+chart = coord_padrao.reset_index()
+
+var_chart = pd.Series(chart['index'].str.split('_', expand=True).iloc[:,0])
+
+chart_df_mca = pd.DataFrame({'categoria': chart['index'],
+                             'obs_x': chart[0],
+                             'obs_y': chart[1],
+                             'variavel': var_chart})
+
+# Configurando a figura e o eixo
+fig, ax = plt.subplots(dpi=600, figsize=(10, 8))
+
+# Garantindo fundo transparente e ausência de grade
+fig.patch.set_facecolor('none')
+ax.set_facecolor('none')
+ax.grid(False)
+
+# Plotando os pontos
+sns.scatterplot(data=chart_df_mca, x='obs_x', y='obs_y', hue='variavel', s=50, ax=ax)
+
+# Tratamento dos textos (Fonte aumentada e repulsão suavizada)
+texts = []
+for i, point in chart_df_mca.iterrows():
+    # Fonte aumentada de 6 para 8
+    texts.append(plt.text(point['obs_x'], point['obs_y'], point['categoria'], fontsize=8))
+
+# force_text reduzido para manter os rótulos mais próximos aos pontos
+# expand_points adiciona uma margem suave ao redor do ponto antes de empurrar o texto
+adjust_text(texts,
+            force_text=(0.4, 0.6),
+            expand_points=(1.2, 1.2),
+            arrowprops=dict(arrowstyle="-", color='gray', lw=0.5))
+
+# Removendo bordas superior e direita
+sns.despine(top=True, right=True, left=False, bottom=False)
+
+# Formatando o Eixo X (principal horizontal) 
+ax.spines['bottom'].set_color('black')
+ax.spines['bottom'].set_linewidth(1.5)
+ax.spines['bottom'].set_linestyle('-')
+
+# Formatando o Eixo Y (principal vertical)
+ax.spines['left'].set_color('black')
+ax.spines['left'].set_linewidth(1.5)
+ax.spines['left'].set_linestyle('-')
+
+# Configuração dos ticks numéricos (leves ajustes de legibilidade)
+plt.tick_params(size=3, labelsize=7)
+
+# Retirando o título
+plt.title('')
+
+# Legenda fora do gráfico com fonte sutilmente maior
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fancybox=True, shadow=True, fontsize='8')
+
+# Títulos dos eixos em Arial, <= 11pt, preto
+font_axes = {'family': 'Arial', 'size': 11, 'color': 'black', 'weight': 'normal'}
+
+plt.xlabel(f"Dim. 1: {tabela_autovalores.iloc[0,1]} da inércia", fontdict=font_axes)
+plt.ylabel(f"Dim. 2: {tabela_autovalores.iloc[1,1]} da inércia", fontdict=font_axes)
+
+plt.tight_layout()
+plt.show()
+
+#%% FIM!
+
