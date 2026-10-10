@@ -1,49 +1,153 @@
-# CÓDIGO PARA ANALISE DE CORRESPONDENCIA MULTIPLA (ACM)
+# -*- coding: utf-8 -*-
+# ANÁLISE DE CORRESPONDÊNCIA MÚLTIPLA (ACM)
+# Gênero x Cor/Raça x Tipo de Cargo — PNAD Contínua (2025, 4º trimestre)
+# Todas as estimativas consideram o plano amostral (peso V1028, Estrato e UPA).
 
-#pip install xlrd>=2.0.1
-#pip install pnadium
-#pip install gspread gspread_dataframe
-#pip install pandas
-#pip install numpy
-#pip install scipy
-#pip install plotly
-#pip install seaborn
-#pip install matplotlib
-#pip install statsmodels
-#pip install prince
-#pip install adjustText
+!pip install "xlrd>=2.0.1" pnadium gspread gspread_dataframe pandas numpy scipy plotly seaborn matplotlib statsmodels prince adjustText
 
-#Importando os pacotes necessários
+#%% Pacotes
 import pandas as pd
 import numpy as np
+from scipy import stats
 from scipy.stats import chi2_contingency
 import seaborn as sns
 import matplotlib.pyplot as plt
 import prince
 import pnadium
+import plotly.graph_objects as go
 from adjustText import adjust_text
 
+#%% Teste qui² com correção de Rao-Scott
 
-# Importando o banco de dados
-pnad_db = pnadium.trimestral.download(2025, 4, colunas =['UF', 'V2007','VD4019','V2010', 'VD4011'])
+def rao_scott(df, var_linha, var_coluna, desenho, peso='V1028', estrato='Estrato', upa='UPA'):
 
-# Renomeando as colunas
+    linhas = sorted(df[var_linha].unique())
+    colunas = sorted(df[var_coluna].unique())
+    r, c = len(linhas), len(colunas)
+    m = r * c
+
+    li = df[var_linha].map({v: i for i, v in enumerate(linhas)}).to_numpy()
+    ci = df[var_coluna].map({v: j for j, v in enumerate(colunas)}).to_numpy()
+    cel = li * c + ci
+
+    w = df[peso].to_numpy(dtype=float)
+    n = len(df)
+    W = w.sum()
+
+    # Proporções ponderadas observadas (P) e esperadas sob independência (E)
+    p = np.bincount(cel, weights=w, minlength=m) / W
+    P = p.reshape(r, c)
+    p_lin = P.sum(axis=1)
+    p_col = P.sum(axis=0)
+    E = np.outer(p_lin, p_col)
+
+    qui2 = n * ((P - E) ** 2 / E).sum()
+    gl = (r - 1) * (c - 1)
+
+    # Covariância das proporções pelo plano amostral (linearização por UPA dentro do estrato)
+    aux = pd.DataFrame({estrato: df[estrato].to_numpy(), upa: df[upa].to_numpy(), 'cel': cel, 'w': w})
+    T = (aux.groupby([estrato, upa, 'cel'])['w'].sum()
+            .unstack(fill_value=0)
+            .reindex(columns=range(m), fill_value=0))
+    Z = (T.to_numpy() - T.to_numpy().sum(axis=1, keepdims=True) * p) / W
+    Z = pd.DataFrame(Z, index=T.index)
+
+    upas = desenho[[estrato, upa]].drop_duplicates()
+    Z = Z.reindex(pd.MultiIndex.from_frame(upas), fill_value=0)
+
+    h = pd.Series(Z.index.get_level_values(0))
+    nh = h.map(h.value_counts()).to_numpy()
+    Zc = (Z - Z.groupby(level=0).transform('mean')).to_numpy()
+    Zc = Zc * np.sqrt(np.where(nh > 1, nh / (nh - 1), 0))[:, None]
+    V = Zc.T @ Zc
+
+    # Contrastes que representam a hipótese de independência
+    M_lin = np.kron(np.eye(r), np.ones((c, 1)))
+    M_col = np.kron(np.ones((r, 1)), np.eye(c))
+    X1 = np.column_stack([np.ones(m), M_lin[:, 1:], M_col[:, 1:]])
+    X12 = np.column_stack([M_lin[:, i] * M_col[:, j] for i in range(1, r) for j in range(1, c)])
+    Q, _ = np.linalg.qr(X1)
+    Cmat = X12 - Q @ (Q.T @ X12)
+
+    # Matriz de efeitos do desenho (Delta)
+    Dinv = np.diag(np.where(p > 0, 1 / p, 0))
+    denom = Cmat.T @ (Dinv / n) @ Cmat
+    numr = Cmat.T @ Dinv @ V @ Dinv @ Cmat
+    Delta = np.linalg.solve(denom, numr)
+    tr = np.trace(Delta)
+    tr2 = np.trace(Delta @ Delta)
+
+    # 1ª ordem: qui² dividido pelo deff médio
+    deff = tr / gl
+    qui2_rs1 = qui2 / deff
+    p_rs1 = stats.chi2.sf(qui2_rs1, gl)
+
+    # 2ª ordem: estatística F (mesmo padrão do survey::svychisq do R)
+    nu = len(upas) - upas[estrato].nunique()
+    gl_num = tr ** 2 / tr2
+    gl_den = gl_num * nu
+    F = qui2 / tr
+    p_rs2 = stats.f.sf(F, gl_num, gl_den)
+
+    contrib = n * (P - E) ** 2 / E / deff
+    resid_pearson = np.sign(P - E) * np.sqrt(contrib)
+
+    # Resíduos ajustados pelo plano amostral (|valor| > 1,96 indica associação a 5%)
+    resid_ajust = np.zeros((r, c))
+    for i in range(r):
+        for j in range(c):
+            g = np.zeros(m)
+            g[i * c + j] += 1
+            g[i * c:(i + 1) * c] -= p_col[j]
+            g[j::c] -= p_lin[i]
+            resid_ajust[i, j] = (P[i, j] - E[i, j]) / np.sqrt(g @ V @ g)
+
+    def como_df(a):
+        return pd.DataFrame(a, index=pd.Index(linhas, name=var_linha), columns=pd.Index(colunas, name=var_coluna))
+
+    return {'n': n, 'qui2': qui2, 'gl': gl, 'deff': deff,
+            'qui2_rs1': qui2_rs1, 'p_rs1': p_rs1,
+            'F': F, 'gl_num': gl_num, 'gl_den': gl_den, 'p_rs2': p_rs2,
+            'contrib': como_df(contrib),
+            'resid_pearson': como_df(resid_pearson),
+            'resid_ajust': como_df(resid_ajust)}
+
+
+def imprimir_rao_scott(res, titulo):
+    print(titulo)
+    print(f"Tamanho da amostra (n): {res['n']}")
+    print(f"Estatística qui² de Pearson (proporções ponderadas, escala amostral): {res['qui2']:.2f}")
+    print(f"Graus de liberdade: {res['gl']}")
+    print(f"Efeito do desenho médio (deff): {res['deff']:.3f}")
+    print(f"Qui² Rao-Scott (1ª ordem): {res['qui2_rs1']:.2f} | p-valor: {res['p_rs1']:.4g}")
+    print(f"F Rao-Scott (2ª ordem): {res['F']:.2f} | gl: ({res['gl_num']:.2f}; {res['gl_den']:.2f}) | p-valor: {res['p_rs2']:.4g}")
+
+
+#%% Download da base (inclui peso V1028 e variáveis do plano amostral)
+pnad_db = pnadium.trimestral.download(2025, 4, colunas =['UF', 'V2007','VD4019','V2010', 'VD4011', 'V1028', 'Estrato', 'UPA'])
+
+# Plano amostral da amostra
+desenho = pnad_db[['Estrato', 'UPA']].copy()
+
 pnad_df = pnad_db.rename(columns={'V2007': 'Genero', 'V2010':'Cor/Raça', 'VD4011' : 'Tipo de Cargo', 'V2003' : 'N° da Ordem', 'V1014': 'Painel', 'V1008' : 'N° de selecao' })
 
-print(pnad_df['Tipo de Cargo'].isna().sum());
+#%% Limpeza
+
+print(pnad_df['Tipo de Cargo'].isna().sum())
 print(pnad_df['Genero'].isna().sum())
 print(pnad_df['Cor/Raça'].isna().sum())
 
-# Excluindo os que possuem valor vazio
+# Mantém apenas registros completos
 pnad_df = pnad_df[pnad_df['Tipo de Cargo'].notna()]
 pnad_df = pnad_df[pnad_df['Genero'].notna()]
 pnad_df = pnad_df[pnad_df['Cor/Raça'].notna()]
 
-# Conversão para INT *APENAS* no Tipo de Cargo para remover as casas decimais no gráfico
+pnad_df['V1028'] = pd.to_numeric(pnad_df['V1028'], errors='coerce')
+pnad_df = pnad_df[pnad_df['V1028'].notna()]
+
 pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].astype(int)
 
-# Traduzindo a descrição dos dados de acordo com o Dicionario PNAD
-
+# Rótulos conforme o Dicionário da PNAD
 pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].replace({
     1:'Direção',
     2:'Intelectuais',
@@ -57,10 +161,7 @@ pnad_df['Tipo de Cargo'] = pnad_df['Tipo de Cargo'].replace({
     10:'Militares',
     11:'Indefinidas'
 })
-
-# Excluindo a variável "Indefinidas" para evitar distorções na análise
 pnad_df = pnad_df[pnad_df['Tipo de Cargo'] != 'Indefinidas']
-
 
 pnad_df['Genero'] = pnad_df['Genero'].replace({
     1:'Homem',
@@ -75,127 +176,174 @@ pnad_df['Cor/Raça'] = pnad_df['Cor/Raça'].replace({
     5:'Indígena',
     9:'Ignorado'
 })
-
-# Excluindo a variável "Ignorado" para evitar distorções na análise
 pnad_df = pnad_df[pnad_df['Cor/Raça'] != 'Ignorado']
 
-# Informações descritivas sobre as variáveis
+#%% Estimativas populacionais (soma dos pesos V1028)
 
-print(pnad_df['Genero'].value_counts())
+print('Estimativas populacionais (ponderadas por V1028)')
+print(' ')
+print(pnad_df.groupby('Genero')['V1028'].sum().round(0).sort_values(ascending=False))
+print(' ')
+print(pnad_df.groupby('Tipo de Cargo')['V1028'].sum().round(0).sort_values(ascending=False))
+print(' ')
+print(pnad_df.groupby('Cor/Raça')['V1028'].sum().round(0).sort_values(ascending=False))
 print(' ')
 
-print(pnad_df['Tipo de Cargo'].value_counts())
+# Conferir com o total de ocupados divulgado pelo IBGE
+print(f"Ocupados estimados: {pnad_df['V1028'].sum() / 1000:,.0f} mil pessoas")
 print(' ')
 
-print(pnad_df['Cor/Raça'].value_counts())
+#%% Tabelas de contingência ponderadas
+
+tabela_mca_1 = pd.crosstab(pnad_df["Genero"], pnad_df["Tipo de Cargo"],
+                           values=pnad_df['V1028'], aggfunc='sum').fillna(0)
+tabela_mca_2 = pd.crosstab(pnad_df["Genero"], pnad_df["Cor/Raça"],
+                           values=pnad_df['V1028'], aggfunc='sum').fillna(0)
+tabela_mca_3 = pd.crosstab(pnad_df["Tipo de Cargo"], pnad_df["Cor/Raça"],
+                           values=pnad_df['V1028'], aggfunc='sum').fillna(0)
+
+# Em mil pessoas
+print((tabela_mca_1 / 1000).round(0))
+print((tabela_mca_2 / 1000).round(0))
+print((tabela_mca_3 / 1000).round(0))
+
+#%% Significância (Rao-Scott) e intensidade da associação (V de Cramér)
+
+# V de Cramér: 0 = sem associação, 1 = associação perfeita (não depende da escala dos pesos)
+def cramers_v(tabela):
+    qui2, p, gl, esperados = chi2_contingency(tabela)
+    n = tabela.to_numpy().sum()
+    r, k = tabela.shape
+    v = np.sqrt(qui2 / (n * min(r - 1, k - 1)))
+    return v
+
+rs_1 = rao_scott(pnad_df, 'Genero', 'Tipo de Cargo', desenho)
+v_1 = cramers_v(tabela_mca_1)
+imprimir_rao_scott(rs_1, "Associação Gênero x Tipo de Cargo")
+print(f"V de Cramér: {v_1:.4f}")
+
+rs_2 = rao_scott(pnad_df, 'Genero', 'Cor/Raça', desenho)
+v_2 = cramers_v(tabela_mca_2)
 print(' ')
+imprimir_rao_scott(rs_2, "Associação Gênero x Cor/Raça")
+print(f"V de Cramér: {v_2:.4f}")
 
-# Analisando as tabelas de contingência
+rs_3 = rao_scott(pnad_df, 'Tipo de Cargo', 'Cor/Raça', desenho)
+v_3 = cramers_v(tabela_mca_3)
+print(' ')
+imprimir_rao_scott(rs_3, "Associação Tipo de Cargo x Cor/Raça")
+print(f"V de Cramér: {v_3:.4f}")
 
-tabela_mca_1 = pd.crosstab(pnad_df["Genero"], pnad_df["Tipo de Cargo"])
-tabela_mca_2 = pd.crosstab(pnad_df["Genero"], pnad_df["Cor/Raça"])
-tabela_mca_3 = pd.crosstab(pnad_df["Tipo de Cargo"], pnad_df["Cor/Raça"])
+#%% Mapas de calor dos resíduos ajustados
+# Vermelho = mais ocorrências que o esperado; azul = menos.
 
-print(tabela_mca_1)
-print(tabela_mca_2)
-print(tabela_mca_3)
+def mapa_calor_residuos(res, titulo):
+    residuos_ajustados = res['resid_ajust']
 
-# Analisando a significância estatística das associações (teste qui²)
+    # Escala simétrica em torno de zero
+    limite = np.max(np.abs(residuos_ajustados.to_numpy()))
+    limite = np.ceil(limite * 10) / 10
 
-from scipy.stats import chi2_contingency
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(
+            x=residuos_ajustados.columns,
+            y=residuos_ajustados.index,
+            z=residuos_ajustados.values,
+            text=residuos_ajustados.values,
+            texttemplate='%{text:.2f}',
+            colorscale=[
+                [0.00, 'skyblue'],
+                [0.50, '#FAF9F6'],
+                [1.00, 'lightcoral']
+            ],
+            zmin=-limite,
+            zmax=limite,
+            colorbar=dict(title='Resíduo')
+        )
+    )
 
-tab_1 = chi2_contingency(tabela_mca_1)
+    fig.update_layout(
+        title_text=titulo,
+        title_x=0.5,
+        height=600,
+        width=700
+    )
 
-print("Associação Genero x Tipo de Cargo")
-print(f"estatística qui²: {round(tab_1[0], 2)}")
-print(f"p-valor da estatística: {round(tab_1[1], 4)}")
-print(f"graus de liberdade: {tab_1[2]}")
+    # Rótulos inclinados quando há muitas categorias
+    fig.update_xaxes(
+        categoryorder='category ascending',
+        tickangle=-45 if len(residuos_ajustados.columns) > 6 else 0,
+        automargin=True
+    )
+    fig.update_yaxes(categoryorder='category descending')
 
-tab_2 = chi2_contingency(tabela_mca_2)
+    fig.show()
 
-print("Associação Genero x Cor/Raça")
-print(f"estatística qui²: {round(tab_2[0], 2)}")
-print(f"p-valor da estatística: {round(tab_2[1], 4)}")
-print(f"graus de liberdade: {tab_2[2]}")
+    imprimir_rao_scott(res, titulo)
+    print(" ")
 
-tab_3 = chi2_contingency(tabela_mca_3)
 
-print("Associação Tipo de Cargo x Cor/Raça")
-print(f"estatística qui²: {round(tab_3[0], 2)}")
-print(f"p-valor da estatística: {round(tab_3[1], 4)}")
-print(f"graus de liberdade: {tab_3[2]}")
+mapa_calor_residuos(rs_1, 'Gênero × Tipo de Cargo — Resíduos Padronizados Ajustados')
+mapa_calor_residuos(rs_2, 'Gênero × Cor/Raça — Resíduos Padronizados Ajustados')
+mapa_calor_residuos(rs_3, 'Tipo de Cargo × Cor/Raça — Resíduos Padronizados Ajustados')
 
-# Elaborando a MCA
+#%% ACM ponderada
 
-# Isolando as variáveis categóricas para evitar o estouro de memória!
-df_mca = pnad_df[['Genero', 'Cor/Raça', 'Tipo de Cargo']]
+variaveis = ['Genero', 'Cor/Raça', 'Tipo de Cargo']
 
-mca = prince.MCA(n_components=2).fit(df_mca)
+df_comb = pnad_df.groupby(variaveis)['V1028'].sum().reset_index()
 
-# Parametrizando a MCA para duas dimensões (eixos X e Y no mapa perceptual)
+binaria = pd.get_dummies(df_comb[variaveis], columns=variaveis, dtype=float)
+binaria_pond = binaria.mul(df_comb['V1028'], axis=0)
 
-# Quantidade total de dimensões
+# 2 dimensões = eixos do mapa perceptual
+mca = prince.CA(n_components=2).fit(binaria_pond)
 
-# Quantidade de dimensões = qtde total de categorias - qtde de variáveis
+#%% Número de dimensões possíveis (J categorias - K variáveis)
 
-# Quantidade total de categorias
-mca.J_
+J = binaria.shape[1]
+K = len(variaveis)
+quant_dim = J - K
 
-# Quantidade de variáveis na análise
-mca.K_
-
-# Quantidade de dimensões
-quant_dim = mca.J_ - mca.K_
-
-# Resumo das informações
-print(f"quantidade total de categorias: {mca.J_}")
-print(f"quantidade de variáveis: {mca.K_}")
+print(f"quantidade total de categorias: {J}")
+print(f"quantidade de variáveis: {K}")
 print(f"quantidade de dimensões: {quant_dim}")
 
-# Visualizando as matrizes: binária e Burt
+#%% Matriz de Burt ponderada (opcional, apenas didático)
+burt = binaria.T @ binaria_pond
 
-# Usando o df_mca para gerar as matrizes
-binaria = pd.get_dummies(df_mca, columns=df_mca.columns, dtype=float)
-
-burt = np.matmul(np.transpose(binaria), binaria)
-
-# Obtendo os eigenvalues
+#%% Autovalores e % de inércia explicada por dimensão
 
 tabela_autovalores = mca.eigenvalues_summary
-
 print(tabela_autovalores)
 
-# Inércia principal total
-
-# Soma de todos os autovalores (todas as dimensões existentes)
+#%% Inércia total — conferência: deve ser igual a (J - K) / K
 
 print(mca.total_inertia_)
+print((J - K) / K)
 
-# Obtendo as coordenadas principais das categorias das variáveis
+#%% Coordenadas das categorias
 
-coord_burt = mca.column_coordinates(df_mca)
-
+# Principais
+coord_burt = mca.column_coordinates(binaria_pond)
 print(coord_burt)
 
-# Obtendo as coordenadas-padrão das categorias das variáveis
-
-coord_padrao = mca.column_coordinates(df_mca)/np.sqrt(mca.eigenvalues_)
-
+# Padrão (usadas no mapa perceptual)
+coord_padrao = coord_burt / np.sqrt(mca.eigenvalues_)
 print(coord_padrao)
 
-# Obtendo as coordenadas das observações do banco de dados
+#%% Coordenadas de cada perfil (combinação Gênero x Cor/Raça x Cargo), não de indivíduos
 
-coord_obs = mca.row_coordinates(df_mca)
-
+coord_obs = pd.concat([df_comb, mca.row_coordinates(binaria_pond)], axis=1)
 print(coord_obs)
 
-# Plotando o mapa perceptual
+#%% Mapa perceptual
+# Categorias próximas no gráfico tendem a estar associadas.
 
-# Forçando o estilo branco puro no seaborn para evitar preenchimentos cinzas do Colab
 sns.set_style("white")
 
-chart = coord_padrao.reset_index()
-
+chart = coord_padrao.rename_axis('index').reset_index()
 var_chart = pd.Series(chart['index'].str.split('_', expand=True).iloc[:,0])
 
 chart_df_mca = pd.DataFrame({'categoria': chart['index'],
@@ -203,60 +351,43 @@ chart_df_mca = pd.DataFrame({'categoria': chart['index'],
                              'obs_y': chart[1],
                              'variavel': var_chart})
 
-# Configurando a figura e o eixo
 fig, ax = plt.subplots(dpi=600, figsize=(10, 8))
 
-# Garantindo fundo transparente e ausência de grade
+# Fundo transparente e sem grade
 fig.patch.set_facecolor('none')
 ax.set_facecolor('none')
 ax.grid(False)
 
-# Plotando os pontos
 sns.scatterplot(data=chart_df_mca, x='obs_x', y='obs_y', hue='variavel', s=50, ax=ax)
 
-# Tratamento dos textos (Fonte aumentada e repulsão suavizada)
 texts = []
 for i, point in chart_df_mca.iterrows():
-    # Fonte aumentada de 6 para 8
     texts.append(plt.text(point['obs_x'], point['obs_y'], point['categoria'], fontsize=8))
 
-# force_text reduzido para manter os rótulos mais próximos aos pontos
-# expand_points adiciona uma margem suave ao redor do ponto antes de empurrar o texto
+# Evita sobreposição dos rótulos mantendo-os próximos aos pontos
 adjust_text(texts,
             force_text=(0.4, 0.6),
             expand_points=(1.2, 1.2),
             arrowprops=dict(arrowstyle="-", color='gray', lw=0.5))
 
-# Removendo bordas superior e direita
+# Apenas eixos inferior e esquerdo, pretos e sólidos
 sns.despine(top=True, right=True, left=False, bottom=False)
+for lado in ['bottom', 'left']:
+    ax.spines[lado].set_color('black')
+    ax.spines[lado].set_linewidth(1.5)
+    ax.spines[lado].set_linestyle('-')
 
-# Formatando o Eixo X (principal horizontal) 
-ax.spines['bottom'].set_color('black')
-ax.spines['bottom'].set_linewidth(1.5)
-ax.spines['bottom'].set_linestyle('-')
-
-# Formatando o Eixo Y (principal vertical)
-ax.spines['left'].set_color('black')
-ax.spines['left'].set_linewidth(1.5)
-ax.spines['left'].set_linestyle('-')
-
-# Configuração dos ticks numéricos (leves ajustes de legibilidade)
 plt.tick_params(size=3, labelsize=7)
-
-# Retirando o título
 plt.title('')
-
-# Legenda fora do gráfico com fonte sutilmente maior
 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fancybox=True, shadow=True, fontsize='8')
 
-# Títulos dos eixos em Arial, <= 11pt, preto
 font_axes = {'family': 'Arial', 'size': 11, 'color': 'black', 'weight': 'normal'}
-
 plt.xlabel(f"Dim. 1: {tabela_autovalores.iloc[0,1]} da inércia", fontdict=font_axes)
 plt.ylabel(f"Dim. 2: {tabela_autovalores.iloc[1,1]} da inércia", fontdict=font_axes)
 
+# Zoom opcional: descomente e ajuste os limites
+# plt.xlim(-2.5, 2.5)
+# plt.ylim(-2.5, 2.5)
+
 plt.tight_layout()
 plt.show()
-
-#%% FIM!
-
